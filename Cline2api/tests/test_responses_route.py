@@ -8,6 +8,10 @@ monkeypatch 掉 requests.post / credential / _model_free / _dump_save，覆盖�
   4. /v1/chat/completions 流式回归：bridge 挂接不破坏老路由
 """
 import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import server
 

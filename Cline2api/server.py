@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 """Cline2api：OpenAI 兼容反代 → api.cline.bot（ClinePass 通道，锁免费模型）。
 
+结构：单上游通道 + 三协议路由分包（本文件只做调度）：
+  routes/chat.py        /v1/chat/completions（近乎直通 + 401 自愈 + 断流保护）
+  routes/responses.py   /v1/responses（经 adapters/responses.py 翻译）
+  routes/messages.py    /v1/messages（经 adapters/anthropic.py 翻译）
+兼容别名 anthropic_bridge / responses_bridge 保留给旧探针。
+
 上游协议（cline 源码 sdk/packages/llms）：
 - chat 上游: POST {API_BASE}/api/v1/chat/completions（LiteLLM 形态，OpenAI 兼容）
 - 免费清单: GET  {API_BASE}/api/v1/ai/cline/recommended-models
@@ -21,8 +27,12 @@ from dotenv import load_dotenv
 from flask import Flask, Response, g, jsonify, request
 
 import credential
-import responses_bridge as rb
-import anthropic_bridge as ab
+from adapters import anthropic, responses
+from routes import chat, messages, responses as routes_responses
+
+# 兼容别名：旧探针/测试引用的旧模块名（anthropic_bridge / responses_bridge）
+anthropic_bridge = anthropic
+responses_bridge = responses
 
 load_dotenv()
 
@@ -283,260 +293,19 @@ def _model_free(model_id: str) -> bool:
     return (model_id.startswith("cline-free/") or model_id.endswith(":free"))
 
 
-@app.route("/v1/chat/completions", methods=["POST"])
-def chat():
-    p = g.payload
-    model = p.get("model") or ""
-    if model and not _model_free(model):
-        logger.warning("[%s] 拒绝非免费模型: %s", g.rid, model)
-        return jsonify(error={"message": "model %s 不在免费清单（Cline2api 只转发免费模型）" % model,
-                              "type": "invalid_request_error"}), 400
-    payload = {k: v for k, v in p.items() if k in (
-        "model", "messages", "stream", "temperature", "top_p", "max_tokens",
-        "tools", "tool_choice", "stop", "user", "stream_options")}
-    payload["model"] = model  # 模型 id 原样转（cline-pass/ 前缀上游自认）
-
-    want_stream = bool(p.get("stream"))
-    try:
-        upstream = requests.post(API_BASE + CHAT_PATH, json=payload,
-                                 headers=_upstream_headers(), stream=want_stream, timeout=180)
-    except requests.RequestException as e:
-        logger.error("[%s] 上游连接失败: %s", g.rid, e)
-        return jsonify(error={"message": str(e), "type": "upstream_error"}), 502
-
-    if upstream.status_code == 401:
-        # 401 自愈：刷新一次重发
-        try:
-            credential.refresh()
-            upstream = requests.post(API_BASE + CHAT_PATH, json=payload,
-                                     headers=_upstream_headers(), stream=want_stream, timeout=180)
-        except Exception as e:
-            logger.error("[%s] 401 刷新后仍失败: %s", g.rid, e)
-            return jsonify(error={"message": "upstream 401 after refresh", "type": "upstream_error"}), 502
-    if upstream.status_code >= 400:
-        body = upstream.text[:400]
-        logger.warning("[%s] 上游错误 HTTP %s: %s", g.rid, upstream.status_code, body)
-        return Response(upstream.text, status=upstream.status_code,
-                        content_type=upstream.headers.get("Content-Type", "application/json"))
-
-    if not want_stream:
-        body = upstream.content
-        logger.info("[%s] done: status=200 %dB %.1fs", g.rid, len(body), time.time() - g.t0)
-        _dump_save(g.rid, "resp", body)
-        return Response(body, status=200, content_type="application/json")
-
-    # 流式生成器在请求上下文销毁后才迭代，期间禁止访问 g.*，否则抛
-    # Working outside of application context（异常再被下面的 except 吞掉），
-    # 表现为日志只有 in: 没有 done:、客户端收到空内容。
-    rid, t0 = g.rid, g.t0
-    dump_on = DUMP_ON  # 流式攒帧于内存，流末一次性落盘（DUMP=0 时不攒）
-
-    def generate():
-        total = 0
-        buf = []
-        try:
-            for chunk in upstream.iter_content(chunk_size=None):
-                if chunk:
-                    total += len(chunk)
-                    if dump_on and total <= DUMP_MAX_BYTES:
-                        buf.append(chunk)
-                    yield chunk
-            logger.info("[%s] done: stream %dB %.1fs", rid, total, time.time() - t0)
-            if dump_on and buf:
-                _dump_save(rid, "resp", b"".join(buf))
-        except GeneratorExit:
-            # 客户端主动断开（长流常见）。GeneratorExit 继承 BaseException，
-            # 不加这分支会被下面的 except 漏掉、也不留日志，排查时看不出是谁先走的。
-            logger.warning("[%s] client 断开: stream %dB %.1fs", rid, total, time.time() - t0)
-            raise
-        except Exception as e:
-            logger.error("[%s] stream 中断: %s (%dB %.1fs)", rid, e, total, time.time() - t0)
-            # 断流时把已收到的部分落盘：正常路径只在流末 _dump_save，中途断了
-            # 就只剩 .req，2.8MB 证据全丢，下一次同样故障无从比对。
-            if dump_on and buf:
-                _dump_save(rid, "resp_partial", b"".join(buf))
-            # 裸掐断会让客户端把半截回答当完整结果。显式补错误帧 + [DONE]
-            # （与 CodeArts2api 的流内错误帧转 OpenAI 错误帧同一套约定）。
-            err = json.dumps({"error": {"message": "upstream stream ended prematurely: %s" % e,
-                                        "type": "upstream_error"}},
-                             ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            try:
-                yield b"data: " + err + b"\n\n"
-                yield b"data: [DONE]\n\n"
-            except GeneratorExit:
-                raise
-
-    resp = Response(generate(), status=200, mimetype="text/event-stream")
-    resp.headers["Cache-Control"] = "no-cache, no-transform"
-    resp.headers["X-Accel-Buffering"] = "no"
-    return resp
+PASSTHROUGH = chat.PASSTHROUGH   # 兼容旧引用（实际使用在 routes/chat.py）
 
 
-# ── OpenAI Responses 端点（grok-build / Codex 等原生 Responses 客户端）──────
-# 上游仍是 Chat 协议：请求体经 responses_bridge 转成 Chat，响应侧把 Chat SSE
-# 包成 Responses SSE（每帧带 sequence_number）。免费清单门与 401 自愈同 chat 路由。
-@app.route("/v1/responses", methods=["POST"])
-def responses_api():
-    p = g.payload
-    if not isinstance(p, dict) or not p:
-        return jsonify(error={"message": "invalid request: JSON object body required",
-                              "type": "invalid_request_error"}), 400
-    model = p.get("model") or ""
-    if model and not _model_free(model):
-        logger.warning("[%s] 拒绝非免费模型: %s", g.rid, model)
-        return jsonify(error={"message": "model %s 不在免费清单（Cline2api 只转发免费模型）" % model,
-                              "type": "invalid_request_error"}), 400
+# ── 协议路由层挂载（routes/）：每协议一个文件，本文件只做调度 ──────────────────
+# register(app, core) 里 core 传本模块：路由经模块属性动态查找（credential、
+# _upstream_headers、_model_free、_dump_save、DUMP_*、logger），测试对
+# server.requests / server.credential 等的打桩对路由层同样生效。
+import sys as _sys
 
-    chat_body = rb.responses_to_chat(p)
-    if not chat_body.get("messages"):
-        return jsonify(error={"message": "invalid request: 'input' is required",
-                              "type": "invalid_request_error"}), 400
-
-    payload = {k: v for k, v in chat_body.items() if k in (
-        "model", "messages", "stream", "temperature", "top_p", "max_tokens",
-        "tools", "tool_choice", "stop", "user", "stream_options")}
-    payload["model"] = model
-
-    want_stream = bool(p.get("stream"))
-    try:
-        upstream = requests.post(API_BASE + CHAT_PATH, json=payload,
-                                 headers=_upstream_headers(), stream=want_stream, timeout=180)
-    except requests.RequestException as e:
-        logger.error("[%s] 上游连接失败: %s", g.rid, e)
-        return jsonify(error={"message": str(e), "type": "upstream_error"}), 502
-
-    if upstream.status_code == 401:
-        # 401 自愈：刷新一次重发（与 chat 同款）
-        try:
-            credential.refresh()
-            upstream = requests.post(API_BASE + CHAT_PATH, json=payload,
-                                     headers=_upstream_headers(), stream=want_stream, timeout=180)
-        except Exception as e:
-            logger.error("[%s] 401 刷新后仍失败: %s", g.rid, e)
-            return jsonify(error={"message": "upstream 401 after refresh", "type": "upstream_error"}), 502
-    if upstream.status_code >= 400:
-        logger.warning("[%s] 上游错误 HTTP %s: %s", g.rid, upstream.status_code,
-                       upstream.text[:400])
-        _dump_save(g.rid, "resp", upstream.text)
-        return Response(upstream.text, status=upstream.status_code,
-                        content_type=upstream.headers.get("Content-Type", "application/json"))
-
-    if want_stream:
-        # 生成器在请求上下文销毁后才迭代，期间禁止访问 g.*（与 chat 同款）
-        rid, t0 = g.rid, g.t0
-
-        def generate():
-            total = 0
-            try:
-                for frame in rb.chat_sse_to_responses(
-                        upstream.iter_lines(decode_unicode=False), model):
-                    total += len(frame)
-                    yield frame
-                logger.info("[%s] done: responses stream %dB %.1fs",
-                            rid, total, time.time() - t0)
-            except GeneratorExit:
-                logger.warning("[%s] client 断开: responses stream %dB %.1fs",
-                               rid, total, time.time() - t0)
-                raise
-            except Exception as e:
-                logger.error("[%s] responses stream 中断: %s (%dB %.1fs)",
-                             rid, e, total, time.time() - t0)
-
-        resp = Response(generate(), status=200, mimetype="text/event-stream")
-        resp.headers["Cache-Control"] = "no-cache, no-transform"
-        resp.headers["X-Accel-Buffering"] = "no"
-        return resp
-
-    body = upstream.content
-    result = json.loads(body.decode("utf-8", "ignore"))
-    out = rb.chat_json_to_responses(result, model)
-    body = json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    logger.info("[%s] done: responses %dB %.1fs", g.rid, len(body), time.time() - g.t0)
-    _dump_save(g.rid, "resp", body)
-    return Response(body, status=200, content_type="application/json")
-
-
-# ── Anthropic Messages 端点（Claude Code 等原生 Anthropic 客户端）──────────────
-# 与 /v1/responses 同构：anthropic_bridge 把 Anthropic ⇄ Chat 翻掉，复用
-# 上游直连 + 401 自愈；响应侧包成 Anthropic SSE。
-@app.route("/v1/messages", methods=["POST"])
-def messages_api():
-    p = g.payload
-    if not isinstance(p, dict) or not p:
-        return jsonify(ab.error_body("invalid_request_error",
-            "invalid request: JSON object body required")), 400
-    model = p.get("model") or ""
-    if model and not _model_free(model):
-        logger.warning("[%s] 拒绝非免费模型: %s", g.rid, model)
-        return jsonify(ab.error_body("invalid_request_error",
-            "model %s 不在免费清单（Cline2api 只转发免费模型）" % model)), 400
-
-    chat_body = ab.anthropic_to_chat(p)
-    if not chat_body.get("messages"):
-        return jsonify(ab.error_body("invalid_request_error",
-            "invalid request: 'messages' is required")), 400
-
-    payload = {k: v for k, v in chat_body.items() if k in (
-        "model", "messages", "stream", "temperature", "top_p", "max_tokens",
-        "tools", "tool_choice", "stop", "user", "stream_options")}
-    payload["model"] = model
-
-    want_stream = bool(p.get("stream"))
-    try:
-        upstream = requests.post(API_BASE + CHAT_PATH, json=payload,
-                                 headers=_upstream_headers(), stream=want_stream, timeout=180)
-    except requests.RequestException as e:
-        logger.error("[%s] 上游连接失败: %s", g.rid, e)
-        return jsonify(ab.error_body("api_error", str(e))), 502
-
-    if upstream.status_code == 401:
-        try:
-            credential.refresh()
-            upstream = requests.post(API_BASE + CHAT_PATH, json=payload,
-                                     headers=_upstream_headers(), stream=want_stream, timeout=180)
-        except Exception as e:
-            logger.error("[%s] 401 刷新后仍失败: %s", g.rid, e)
-            return jsonify(ab.error_body("api_error", "upstream 401 after refresh")), 502
-    if upstream.status_code >= 400:
-        logger.warning("[%s] 上游错误 HTTP %s: %s", g.rid, upstream.status_code,
-                       upstream.text[:400])
-        _dump_save(g.rid, "resp", upstream.text)
-        err = ab.error_body(ab.err_type_for_http(upstream.status_code), upstream.text[:400])
-        return Response(json.dumps(err, ensure_ascii=False), status=upstream.status_code,
-                        content_type="application/json")
-
-    if want_stream:
-        rid, t0 = g.rid, g.t0
-
-        def generate():
-            total = 0
-            try:
-                for frame in ab.chat_sse_to_anthropic(
-                        upstream.iter_lines(decode_unicode=False), model):
-                    total += len(frame)
-                    yield frame
-                logger.info("[%s] done: messages stream %dB %.1fs",
-                            rid, total, time.time() - t0)
-            except GeneratorExit:
-                logger.warning("[%s] client 断开: messages stream %dB %.1fs",
-                               rid, total, time.time() - t0)
-                raise
-            except Exception as e:
-                logger.error("[%s] messages stream 中断: %s (%dB %.1fs)",
-                             rid, e, total, time.time() - t0)
-
-        resp = Response(generate(), status=200, mimetype="text/event-stream")
-        resp.headers["Cache-Control"] = "no-cache, no-transform"
-        resp.headers["X-Accel-Buffering"] = "no"
-        return resp
-
-    body = upstream.content
-    result = json.loads(body.decode("utf-8", "ignore"))
-    out = ab.chat_json_to_anthropic(result, model)
-    body = json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    logger.info("[%s] done: messages %dB %.1fs", g.rid, len(body), time.time() - g.t0)
-    _dump_save(g.rid, "resp", body)
-    return Response(body, status=200, content_type="application/json")
+_core = _sys.modules[__name__]
+chat.register(app, _core)
+routes_responses.register(app, _core)
+messages.register(app, _core)
 
 
 if __name__ == "__main__":
