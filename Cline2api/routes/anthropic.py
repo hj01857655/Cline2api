@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""routes/messages.py — Anthropic Messages 协议路由（/v1/messages）。
+"""routes/anthropic.py — Anthropic Messages 协议路由（/v1/messages）。
 
 Claude Code 等原生 Anthropic 客户端。adapters/anthropic.py 把 Anthropic ⇄ Chat
 双向翻掉，复用上游直连 + 401 自愈；响应侧包成 Anthropic SSE。

@@ -4,7 +4,7 @@
 结构：单上游通道 + 三协议路由分包（本文件只做调度）：
   routes/chat.py        /v1/chat/completions（近乎直通 + 401 自愈 + 断流保护）
   routes/responses.py   /v1/responses（经 adapters/responses.py 翻译）
-  routes/messages.py    /v1/messages（经 adapters/anthropic.py 翻译）
+  routes/anthropic.py    /v1/messages（经 adapters/anthropic.py 翻译）
 兼容别名 anthropic_bridge / responses_bridge 保留给旧探针。
 
 上游协议（cline 源码 sdk/packages/llms）：
@@ -28,7 +28,7 @@ from flask import Flask, Response, g, jsonify, request
 
 import credential
 from adapters import anthropic, responses
-from routes import chat, messages, responses as routes_responses
+from routes import anthropic, chat, responses as routes_responses
 
 # 兼容别名：旧探针/测试引用的旧模块名（anthropic_bridge / responses_bridge）
 anthropic_bridge = anthropic
@@ -305,7 +305,7 @@ import sys as _sys
 _core = _sys.modules[__name__]
 chat.register(app, _core)
 routes_responses.register(app, _core)
-messages.register(app, _core)
+anthropic.register(app, _core)
 
 
 if __name__ == "__main__":
