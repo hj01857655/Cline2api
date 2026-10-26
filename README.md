@@ -64,3 +64,15 @@ go test ./...
 `internal/handler/golden_test.go` 移植自 Python 版 `tests/test_responses_route.py`：
 httptest 假上游覆盖 Responses 流式（seq 连续性、生命周期、usage、items 顺序）、
 非流式、上游 4xx 透传、chat 流式回归。
+
+## Docker 部署
+
+```bash
+# 配置环境变量后启动
+cp .env.example .env   # 按需填写
+docker compose up -d
+```
+
+镜像同时发布到 GHCR：`ghcr.io/hj01857655/hj01857655/Cline2api`（跟随 v* 标签发布，含 latest，linux/amd64 + linux/arm64）。
+
+二进制发版：推送 `v*` 标签后 Actions 自动构建 linux / windows / darwin 的 amd64 + arm64 六平台产物并发布 Release。

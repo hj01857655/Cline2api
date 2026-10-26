@@ -1,0 +1,19 @@
+services:
+  cline2api:
+    build: .
+    container_name: cline2api
+    restart: unless-stopped
+    ports:
+      - "8381:8381"
+    environment:
+      - API_KEY=${API_KEY}
+      - HOST=${HOST:-0.0.0.0}
+      - PORT=${PORT:-8381}
+    volumes:
+      - ./data:/app/data
+    networks:
+      - cline2api_net
+
+networks:
+  cline2api_net:
+    driver: bridge
