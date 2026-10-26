@@ -1,5 +1,7 @@
 # Cline2api-go
 
+![Go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey) ![Type](https://img.shields.io/badge/type-API%20Gateway-blue)
+
 Python 版 [Cline2api](../Cline2api) 的 Go 迁移版：OpenAI 兼容反代 → api.cline.bot
 （ClinePass 通道，锁免费模型）。零第三方依赖（纯标准库），单 exe 部署。
 
