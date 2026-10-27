@@ -1,5 +1,5 @@
 // Package cred 的 OAuth 登录：WorkOS 设备流 → Cline register，
-// 凭据落盘 ~/.cline/data/Cline2api_auth.json（与 Python oauth.py 同路径同格式），
+// 凭据落盘 exe 同目录 credentials.json（StateDir，不碰 ~/.cline 的 IDE 凭证），
 // 之后迁入状态目录 credentials.json 供服务使用。
 //
 // 协议依据 cline 源码 sdk/packages/core/src/auth/cline.ts（useWorkOSDeviceAuth 路径）。
@@ -29,11 +29,11 @@ const (
 
 // AuthStorePath 返回登录凭据落盘路径 ~/.cline/data/Cline2api_auth.json。
 func AuthStorePath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
+	// 落盘到网关自己项目（exe 同目录 = StateDir），不写 ~/.cline 的 IDE 凭证目录
+	if exe, err := os.Executable(); err == nil {
+		return filepath.Join(filepath.Dir(exe), "credentials.json")
 	}
-	return filepath.Join(home, ".cline", "data", "Cline2api_auth.json")
+	return "credentials.json"
 }
 
 // Login 走完整设备流并把凭据写入 AUTH_STORE，返回该路径。
