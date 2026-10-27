@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -88,6 +89,17 @@ func Login() (string, error) {
 			"grant_type":  deviceGrant,
 			"device_code": dev.DeviceCode,
 		}, &tokens); err != nil {
+			// RFC 8628 §3.5：WorkOS 对 pending/slow_down 返回 HTTP 400，error 字段在
+			// body 里。必须解析后继续轮询，而不是把 400 当致命错误（否则首次轮询
+			// 即挂，用户授权永远追不上一个已死流程）。
+			msg := err.Error()
+			if strings.Contains(msg, "authorization_pending") {
+				continue
+			}
+			if strings.Contains(msg, "slow_down") {
+				interval += 5 * time.Second
+				continue
+			}
 			return "", fmt.Errorf("token 轮询失败：%w", err)
 		}
 		if tokens.AccessToken != "" {
