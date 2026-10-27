@@ -208,6 +208,18 @@ func (l *List) IsFree(modelID string) bool {
 	return isFreeName(modelID)
 }
 
+// Status 面板/诊断用的清单快照：数量、id、空清单与退避窗口标记。
+func (l *List) Status() map[string]any {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return map[string]any{
+		"count":   len(l.ids),
+		"ids":     append([]string(nil), l.ids...),
+		"empty":   len(l.ids) == 0,
+		"backoff": !l.failUntil.IsZero() && time.Now().Before(l.failUntil),
+	}
+}
+
 // IDs 返回当前免费清单（/v1/models 用）；空时先快速补拉一次。
 func (l *List) IDs() []string {
 	l.mu.Lock()

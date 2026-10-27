@@ -80,10 +80,13 @@ func (s *Server) nextRID() string {
 	return fmt.Sprintf("r%04d", s.reqSeq.Add(1))
 }
 
-// Handler 组装路由。鉴权中间件包在最外层（/health 例外）。
+// Handler 组装路由。鉴权中间件包在最外层（/health 与 /admin 页面例外；
+// /admin/api/* 仍走鉴权——面板 HTML 本身无敏感数据，数据接口不放行）。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.health)
+	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) { s.servePanel(w) })
+	mux.HandleFunc("/admin/api/overview", s.adminOverview)
 	mux.HandleFunc("/v1/models", s.models)
 	mux.HandleFunc("/v1/chat/completions", s.chat)
 	mux.HandleFunc("/v1/responses", s.responses)
@@ -97,7 +100,7 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		rid := s.nextRID()
 		t0 := time.Now()
 
-		if s.Cfg.APIKey != "" && r.URL.Path != "/health" {
+		if s.Cfg.APIKey != "" && r.URL.Path != "/health" && r.URL.Path != "/admin" {
 			if r.Header.Get("Authorization") != "Bearer "+s.Cfg.APIKey {
 				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 				return

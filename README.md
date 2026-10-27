@@ -5,13 +5,18 @@
 Python 版 [Cline2api](../Cline2api) 的 Go 迁移版：OpenAI 兼容反代 → api.cline.bot
 （ClinePass 通道，锁免费模型）。零第三方依赖（纯标准库），单 exe 部署。
 
-## 三协议路由
+## 接口
 
-| 路由 | 协议 | 客户端 |
-|---|---|---|
-| `/v1/chat/completions` | OpenAI Chat（近直通） | 通用 OpenAI 客户端 |
-| `/v1/responses` | OpenAI Responses（每帧带 sequence_number） | Codex / grok-build |
-| `/v1/messages` | Anthropic Messages SSE | Claude Code / Kiro |
+| 端点 | 说明 |
+|---|---|
+| `GET /health` | 健康检查（永远免鉴权） |
+| `GET /v1/models` | 模型列表（免费池实时清单，`owned_by: cline-free`） |
+| `POST /v1/chat/completions` | OpenAI Chat Completions（近直通），通用 OpenAI 客户端 |
+| `POST /v1/responses` | OpenAI Responses SSE（每帧带 sequence_number），Codex / grok-build |
+| `POST /v1/messages` | Anthropic Messages SSE，Claude Code / Kiro |
+| `GET /`、`/admin` | Web 管理面板（内置，开箱即用）：凭据状态、免费池状态、模型清单与健康诊断。状态目录放一份自定义 `panel.html` 可覆盖内置版 |
+
+`/admin/api/overview` 面板数据源：凭据快照（`credential.valid` = accessToken 可读，不含 token 本体）、免费池状态（`free_pool.count/backoff/empty`）、模型清单与 `local_auth`（API_KEY 是否开启）。`API_KEY` 非空时 `/admin` 页面可匿名打开，`/admin/api/*` 与业务路由同样需要 Bearer。
 
 ## 构建与运行
 
@@ -73,6 +78,6 @@ cp .env.example .env   # 按需填写
 docker compose up -d
 ```
 
-镜像同时发布到 GHCR：`ghcr.io/hj01857655/hj01857655/Cline2api`（跟随 v* 标签发布，含 latest，linux/amd64 + linux/arm64）。
+镜像同时发布到 GHCR：`ghcr.io/hj01857655/cline2api`（跟随 v* 标签发布，含 latest，linux/amd64 + linux/arm64）。
 
 二进制发版：推送 `v*` 标签后 Actions 自动构建 linux / windows / darwin 的 amd64 + arm64 六平台产物并发布 Release。

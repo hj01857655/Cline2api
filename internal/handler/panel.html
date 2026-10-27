@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cline2api</title>
+<style>
+:root{--bg:#0f1115;--card:#181b22;--line:#262b36;--tx:#e6e9ef;--dim:#8b93a3;--ok:#4ade80;--bad:#f87171;--warn:#fbbf24;--acc:#6ea8fe}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.6 "Segoe UI",system-ui,sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:20px 16px 60px}
+h1{font-size:18px;margin:0 0 4px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:16px;flex-wrap:wrap}
+.tabs button{background:none;border:none;color:var(--dim);padding:8px 14px;cursor:pointer;font-size:14px;border-bottom:2px solid transparent}
+.tabs button.on{color:var(--acc);border-bottom-color:var(--acc)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+.card h3{margin:0 0 10px;font-size:14px}
+.kv{display:grid;grid-template-columns:110px 1fr;gap:4px 12px;font-size:13px}
+.kv b{color:var(--dim);font-weight:400}
+button{background:var(--acc);border:none;border-radius:6px;color:#0b1220;padding:7px 14px;cursor:pointer;font-size:13px;font-weight:600}
+button.ghost{background:none;border:1px solid var(--line);color:var(--tx);font-weight:400}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+th{color:var(--dim);font-weight:400}
+.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}.dim{color:var(--dim)}
+.badge{display:inline-block;border-radius:99px;padding:1px 9px;font-size:11px;font-weight:600}
+.badge.on{background:#14321f;color:var(--ok)}.badge.off{background:#321414;color:var(--bad)}.badge.mid{background:#332a14;color:var(--warn)}
+.mono{font-family:Consolas,monospace;font-size:12px}
+#msg{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1f2430;border:1px solid var(--line);border-radius:8px;padding:10px 18px;font-size:13px;display:none;max-width:80vw}
+input{background:#0d0f13;border:1px solid var(--line);border-radius:6px;color:var(--tx);padding:7px 10px;font-size:13px;width:180px}
+pre{white-space:pre-wrap;word-break:break-all;font-family:Consolas,monospace;font-size:12px;margin:0}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Cline2api 控制台</h1>
+<div class="tabs">
+<button class="on" onclick="tab(this,'vMain')">概览</button>
+<button onclick="tab(this,'vDiag')">诊断</button>
+</div>
+<div id="vMain"></div>
+<div id="vDiag" style="display:none"></div>
+</div>
+<div id="msg"></div>
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+function authHeaders(){const k=localStorage.cline_apikey;if(!k)return{"Content-Type":"application/json"};return{"Content-Type":"application/json","Authorization":"Bearer "+k}}
+const api=(p,opt={})=>fetch("/admin/api/"+p,Object.assign({headers:authHeaders()},opt)).then(r=>r.json()).catch(e=>({ok:false,message:String(e)}));
+let tt;function toast(t){const m=$("#msg");m.textContent=t;m.style.display="block";clearTimeout(tt);tt=setTimeout(()=>m.style.display="none",3000)}
+function esc(s){const d=document.createElement("div");d.textContent=s==null?"":String(s);return d.innerHTML}
+function tab(btn,id){document.querySelectorAll(".tabs button").forEach(b=>b.classList.remove("on"));btn.classList.add("on");
+  $("#vMain").style.display=id==="vMain"?"":"none";$("#vDiag").style.display=id==="vDiag"?"":"none"}
+
+async function load(){
+  const o=await api("overview");
+  if(!o.credential){$("#vMain").innerHTML='<div class="card bad">overview 加载失败</div>';return}
+  const c=o.credential,p=o.free_pool||{};
+  const poolState=p.backoff?'<span class="badge mid">退避窗口中（保留旧清单，30s 后台补拉）</span>'
+    :p.empty?'<span class="badge off">空（请求按命名规则兜底放行）</span>'
+    :'<span class="badge on">正常（60s 后台刷新）</span>';
+  $("#vMain").innerHTML=`
+  <div class="card"><h3>凭据</h3><div class="kv">
+    <b>状态</b><span class="${c.valid?"ok":"bad"}">${c.valid?"有效":"无效"}${c.notice?" — "+esc(c.notice):""}</span>
+    <b>通道</b><span>${esc(c.provider||"—")} <span class="dim">（ClinePass，锁免费模型）</span></span>
+    <b>有效期</b><span class="${(c.expiresAt||0)>0&&c.expiresAt*1000-Date.now()<600000?"warn":""}">${esc(c.remain_text||"—")}</span>
+    <b>本地鉴权</b><span>${o.local_auth?`<span class="badge on">API_KEY 已开启</span> <input id="k" placeholder="API Key" value="${esc(localStorage.cline_apikey||"")}"> <button class="ghost" onclick="localStorage.cline_apikey=document.getElementById('k').value;toast('已保存')">保存</button>`:'<span class="badge off">未开启（仅回环）</span>'}</span>
+  </div></div>
+  <div class="card"><h3>免费池</h3><div class="kv">
+    <b>状态</b><span>${poolState}</span>
+    <b>模型数</b><span>${p.count??"—"}</span>
+  </div></div>
+  <div class="card"><h3>模型 ${p.count?`<span class="dim">（${p.count} 个免费）</span>`:""}</h3>
+    <table><tr><th>模型</th><th>归属</th></tr>
+    ${(o.models||[]).map(m=>`<tr><td class="mono">${esc(m.id)}</td><td class="dim">${esc(m.owned_by)}</td></tr>`).join("")||( '<tr><td class="dim" colspan="2">清单为空</td></tr>')}</table></div>`;
+  $("#vDiag").innerHTML=`
+  <div class="card"><h3>/health</h3><button class="ghost" onclick="loadDiag()">刷新</button><pre id="hOut" style="margin-top:10px"></pre></div>
+  <div class="card"><h3>overview 原始数据</h3><pre>${esc(JSON.stringify(o,null,2))}</pre></div>`;
+  loadDiag();
+}
+async function loadDiag(){
+  try{const r=await fetch("/health",{headers:authHeaders()});
+    $("#hOut").textContent=JSON.stringify(await r.json(),null,2);
+  }catch(e){$("#hOut").textContent=String(e)}
+}
+load();
+</script>
+</body>
+</html>
